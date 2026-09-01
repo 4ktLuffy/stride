@@ -117,23 +117,6 @@ approves is not validating anything.
 
 ---
 
-## On the numbers
-
-Every figure in this repository is arithmetic over model geometry and published
-vendor specifications. **Nothing here has been benchmarked on a GPU.**
-
-The parameter counts are checked against independently published model sizes
-rather than against other parts of this codebase — a self-consistent but wrong
-formula would mis-size the cache on every deployment and never trip a test.
-Card specifications are vendor peak figures, which are ceilings rather than
-expectations; they inform capacity arithmetic only, and should be replaced with
-values measured on your own fleet before they inform a scheduling decision.
-
-When kernels and execution land, measured numbers will replace estimates and be
-labelled as such, with the hardware, driver and command needed to reproduce
-them.
-
----
 
 ## Building
 
@@ -162,23 +145,7 @@ trace.
 
 ---
 
-## Roadmap
 
-Not yet built, in the order they are worth building:
-
-- **Execution backend** — a trait over model execution plus an analytic
-  simulator, so the full loop runs end to end without a GPU, and a PyTorch
-  bridge for real weights.
-- **OpenAI-compatible API** — streaming completions over SSE, admission
-  control, backpressure and cancellation, with no Python on the request path.
-- **Kernels** — fused RMSNorm and RoPE, paged attention, W4A16 GEMM, and an
-  autotuner that gates every candidate against a reference at a declared
-  tolerance and keeps the Pareto front. Requires hardware to be more than
-  plausible-looking code.
-- **Distributed execution** — NCCL collectives behind the parallelism plans this
-  repository already validates.
-
----
 
 ## License
 
