@@ -94,13 +94,18 @@ def _emits_nan(x, weight, eps=1e-5):
 
 
 def _non_deterministic(x, weight, eps=1e-5):
-    """Adds unseeded noise, as a stand-in for a race on shared memory.
+    """Adds unseeded noise far below the numeric tolerance.
 
-    Numerically it is almost right, so only the determinism check catches it.
-    That is the point: the same input twice must give the same output.
+    A stand-in for a race on shared memory, where the result differs run to run
+    by less than the amount a numeric check would flag. The perturbation is
+    deliberately smaller than the tightest tolerance in DEFAULT_RTOL, so the
+    numeric comparison passes and *only* the determinism check can reject this.
+    That is what the control is for: an earlier version used noise of 1e-2, was
+    caught by the numeric check, and so never exercised the determinism path at
+    all.
     """
     out = reference_rms_norm(x, weight, eps)
-    return out + torch.randn_like(out) * 1e-2
+    return out + torch.randn_like(out) * 1e-9
 
 
 def _subtly_wrong_scale(x, weight, eps=1e-5):

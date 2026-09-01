@@ -49,3 +49,40 @@ def test_tolerance_must_be_declared_not_defaulted():
 
     with pytest.raises(KeyError):
         Tolerance.for_dtype(torch.int32)
+
+
+def test_determinism_check_is_what_catches_the_race_control():
+    """The race control must be rejected for being non-deterministic.
+
+    If it is rejected on numerics instead, the perturbation is too large and the
+    determinism path is going untested — which is how this control was wrong
+    before.
+    """
+    from stride_worker.autotune.gate import gate
+
+    result = gate(
+        negative_control._non_deterministic,
+        negative_control.reference_rms_norm,
+        negative_control.input_factory("cpu", torch.float32),
+        Tolerance.for_dtype(torch.float32),
+        trials=4,
+    )
+    assert not result.passed
+    assert not result.deterministic, (
+        f"rejected for the wrong reason: {result.reason}. The perturbation must "
+        "stay below the numeric tolerance so only the determinism check fires."
+    )
+
+
+def test_the_race_control_would_pass_a_numerics_only_check():
+    """Confirms the perturbation really is below the numeric tolerance."""
+    from stride_worker.autotune.gate import compare
+
+    args = negative_control.input_factory("cpu", torch.float32)(1)
+    reference = negative_control.reference_rms_norm(*args)
+    candidate = negative_control._non_deterministic(*args)
+    numeric = compare(candidate, reference, Tolerance.for_dtype(torch.float32))
+    assert numeric.passed, (
+        "the race control is numerically detectable, so it does not isolate "
+        "the determinism check"
+    )

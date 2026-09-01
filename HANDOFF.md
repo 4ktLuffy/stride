@@ -19,9 +19,10 @@ what has and has not been executed.
 | `RemoteExecutor` — Rust client for the GPU worker | yes | **no** | needs a worker |
 | `stride_worker` — PyTorch execution, paged cache | yes | **no** | needs a GPU |
 | Triton kernels — RMSNorm, paged attention, W4A16 GEMM | yes | **no** | needs a GPU |
-| Autotuner — gate, Pareto search, negative controls | yes | **no** | needs PyTorch |
+| Autotuner — correctness gate and negative controls | yes | yes | CI, on CPU |
+| Autotuner — Pareto search over kernel configs | yes | **no** | needs Triton |
 
-**Nothing in the bottom four rows has ever run.** They were written on a Mac
+**Nothing marked "no" above has ever run.** They were written on a Mac
 with no CUDA device. The Rust side compiles and the Python side parses; neither
 is evidence that either works. Assume the first run finds bugs, and read the
 "what will break first" section before you start.
@@ -66,6 +67,9 @@ Send the same long system prompt twice and watch `stride_cached_prompt_tokens`
 go from 0 to nearly the whole prompt. That is the prefix cache working.
 
 ### 3. The correctness gate, CPU only, needs PyTorch (5 minutes)
+
+This one already runs green in CI on every push, so it should pass first try.
+Run it anyway on your machine — it is the check everything else rests on.
 
 ```bash
 cd python && pip install -e '.[dev]' && stride-autotune verify
