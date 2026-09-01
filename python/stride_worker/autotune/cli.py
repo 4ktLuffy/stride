@@ -94,15 +94,33 @@ def cmd_rmsnorm(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="stride-autotune")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--dtype", default="float32", choices=sorted(DTYPES))
+    # --device and --dtype are shared by every subcommand rather than living on
+    # the top-level parser, so they may be written after the subcommand. On the
+    # top level alone, `stride-autotune verify --device cpu` is an argparse
+    # error, which is the order everyone reaches for first.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="device to run on (default: cuda when available)",
+    )
+    common.add_argument("--dtype", default="float32", choices=sorted(DTYPES))
+
+    parser = argparse.ArgumentParser(prog="stride-autotune", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
 
-    verify = sub.add_parser("verify", help="check the gate rejects known-broken kernels")
+    verify = sub.add_parser(
+        "verify",
+        parents=[common],
+        help="check the gate rejects known-broken kernels",
+    )
     verify.set_defaults(func=cmd_verify)
 
-    rms = sub.add_parser("rmsnorm", help="tune the fused RMSNorm kernel")
+    rms = sub.add_parser(
+        "rmsnorm",
+        parents=[common],
+        help="tune the fused RMSNorm kernel",
+    )
     rms.add_argument("--out", default=None, help="write a JSON report here")
     rms.add_argument("--trials", type=int, default=6)
     rms.add_argument("--verbose", action="store_true")
