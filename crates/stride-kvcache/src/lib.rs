@@ -215,13 +215,16 @@ impl KvCache {
     }
 
     pub fn stats(&self) -> CacheStats {
-        let free = self.alloc.num_free();
-        let cached = self.prefix.num_evictable();
+        // Each figure comes from the structure that owns it: the allocator
+        // knows what is referenced and what is on the free list, the index
+        // knows what is cached. None is derived from the others, so the
+        // partition identity is a claim about the code rather than about
+        // arithmetic, and `assert_invariants` can actually fail.
         CacheStats {
             capacity: self.alloc.capacity(),
-            live: self.alloc.capacity() - free - cached,
-            cached,
-            free,
+            live: self.alloc.num_live(),
+            cached: self.prefix.num_evictable(),
+            free: self.alloc.num_free(),
             block_hit_rate: self.prefix.hit_rate(),
         }
     }
@@ -232,12 +235,42 @@ impl KvCache {
 
     /// Panics unless the live/cached/free partition holds. Called by tests and
     /// by debug builds of the scheduler after each step.
+    ///
+    /// Every block must be in exactly one of the three states. Because the
+    /// three counts are now maintained independently, a block that is dropped,
+    /// double-counted, or left in two states at once makes this fail — which is
+    /// the entire point. An earlier version derived `live` from the other two
+    /// and so asserted an identity that no bug could violate.
     pub fn assert_invariants(&self) {
         let s = self.stats();
+        self.prefix.assert_consistent();
+
+        assert_eq!(
+            self.alloc.num_live(),
+            self.alloc.recount_live(),
+            "the live counter drifted from the reference table: {s:?}"
+        );
+        assert_eq!(
+            s.cached,
+            self.recount_cached(),
+            "the reported cached count drifted from the index: {s:?}"
+        );
         assert_eq!(
             s.live + s.cached + s.free,
             s.capacity,
-            "block partition does not cover the pool: {s:?}"
+            "every block must be live, cached or free — exactly one. {s:?}"
         );
+    }
+
+    /// Recount cached blocks from the index: indexed, and referenced by nobody.
+    ///
+    /// The definition of "cached", recomputed from first principles rather than
+    /// read off the eviction set the reported figure comes from. A count
+    /// checked against itself proves nothing.
+    pub fn recount_cached(&self) -> usize {
+        self.prefix
+            .indexed_blocks()
+            .filter(|&b| !self.alloc.is_live(b))
+            .count()
     }
 }

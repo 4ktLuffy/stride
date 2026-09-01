@@ -349,3 +349,125 @@ fn invalid_sampling_parameters_are_refused() {
     bad.params.top_p = 0.0;
     assert!(s.admit(bad).is_err());
 }
+
+/// Hammers the path a hardware run flagged: preemption, resumption and prefix
+/// reuse interleaved under sustained memory pressure.
+///
+/// The reported cache figures were observed to drift from the real block state
+/// by a block after enough of these cycles. The invariant is checked after
+/// every single step rather than at the end, because a drift that later
+/// corrects itself is still wrong while it lasts — and an autoscaler reading
+/// the metric would act on it.
+#[test]
+fn accounting_survives_repeated_preempt_resume_with_prefix_reuse() {
+    let cfg = SchedulerConfig {
+        max_batch_tokens: 256,
+        max_batch_seqs: 8,
+        watermark: 0.0,
+        ..Default::default()
+    };
+    // Small enough that preemption is constant rather than incidental.
+    let mut s = scheduler(cfg, 24);
+    let mut now = 0;
+
+    // A shared system prompt, so every admission exercises the prefix path.
+    let system: Vec<u32> = (0..96).collect();
+
+    let mut admitted = 0;
+    let mut preemptions = 0;
+
+    for round in 0..60 {
+        // Keep the queue populated with work that shares a prefix but diverges.
+        for k in 0..3 {
+            let suffix = 1000 + (round * 3 + k) as u32 * 16;
+            let prompt: Vec<u32> = system.iter().copied().chain(suffix..suffix + 32).collect();
+            let mut r = Request::new("acme", prompt, now);
+            r.params = SamplingParams::greedy(24);
+            if s.admit(r).is_ok() {
+                admitted += 1;
+            }
+        }
+
+        for _ in 0..12 {
+            let batch = s.step(now);
+            preemptions += batch.preempted.len();
+
+            // Every step, not just at the end: a figure that is wrong only
+            // between two steps is still read by /metrics in that window.
+            s.cache().assert_invariants();
+
+            let stats = s.cache().stats();
+            assert_eq!(
+                stats.cached,
+                s.cache().recount_cached(),
+                "cached count drifted at round {round}: {stats:?}"
+            );
+
+            let outputs: Vec<_> = batch.decode.iter().map(|&id| (id, FILLER)).collect();
+            s.on_tokens(&outputs, now);
+            now += STEP_US;
+        }
+    }
+
+    assert!(admitted > 20, "the test should have admitted real work");
+    assert!(
+        preemptions > 0,
+        "24 blocks cannot hold this workload; preemption must have occurred"
+    );
+    assert!(
+        s.metrics().finished > 0,
+        "sequences must still complete under pressure, not just thrash"
+    );
+
+    // Drain, then check the pool comes back whole. A leak shows up here as
+    // blocks that are neither live nor reclaimable once nothing is running.
+    for _ in 0..400 {
+        let batch = s.step(now);
+        let outputs: Vec<_> = batch.decode.iter().map(|&id| (id, FILLER)).collect();
+        s.on_tokens(&outputs, now);
+        s.cache().assert_invariants();
+        now += STEP_US;
+        if s.num_running() == 0 && s.num_waiting() == 0 {
+            break;
+        }
+    }
+
+    let stats = s.cache().stats();
+    assert_eq!(
+        stats.live, 0,
+        "no sequence is running, so nothing may be live: {stats:?}"
+    );
+    assert_eq!(
+        stats.cached + stats.free,
+        stats.capacity,
+        "every block must be reclaimable once the pool is idle: {stats:?}"
+    );
+}
+
+/// The invariant check must be capable of failing.
+///
+/// An earlier version derived `live` as `capacity - free - cached`, which made
+/// the partition identity true by construction: no bug could violate it, and it
+/// silently passed for the entire life of the crate. This asserts the three
+/// counts are now independent enough that they can disagree.
+#[test]
+fn negative_control_the_invariant_is_not_vacuous() {
+    let mut s = scheduler(SchedulerConfig::default(), 64);
+    let mut now = 0;
+    s.admit(request("acme", 64, 8, now)).unwrap();
+    drive(&mut s, 10, &mut now);
+
+    let stats = s.cache().stats();
+    // If `live` were still derived, this sum would hold no matter what the
+    // other two figures were, and the assertion below would prove nothing.
+    assert_eq!(stats.live + stats.cached + stats.free, stats.capacity);
+    assert_eq!(
+        stats.cached,
+        s.cache().recount_cached(),
+        "cached must be recomputable from the index alone"
+    );
+    assert!(
+        stats.cached > 0 || stats.free > 0,
+        "a finished sequence leaves reclaimable blocks behind"
+    );
+}

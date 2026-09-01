@@ -106,6 +106,43 @@ impl PrefixCache {
         self.by_block.contains_key(&block)
     }
 
+    /// Every block the index currently names.
+    ///
+    /// Used to recount cached blocks from the index itself rather than from the
+    /// eviction set, so a block that fell out of one structure but not the
+    /// other is detectable.
+    pub fn indexed_blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.by_block.keys().copied()
+    }
+
+    /// Panics if the index and the eviction set disagree about what exists.
+    ///
+    /// They are separate structures updated by separate paths; a stale stamp
+    /// would leave an entry stranded in one of them, and the count reported to
+    /// callers would drift from reality without any single operation being
+    /// obviously wrong.
+    pub fn assert_consistent(&self) {
+        assert_eq!(
+            self.by_hash.len(),
+            self.by_block.len(),
+            "the forward and reverse indexes disagree: {} hashes, {} blocks",
+            self.by_hash.len(),
+            self.by_block.len()
+        );
+        for (stamp, block) in &self.evictable {
+            assert!(
+                self.by_block.contains_key(block),
+                "{block:?} is evictable but not indexed"
+            );
+            assert_eq!(
+                self.stamp.get(block),
+                Some(stamp),
+                "{block:?} is in the eviction set under a stale stamp, so it can \
+                 never be removed from it"
+            );
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.by_hash.len()
     }

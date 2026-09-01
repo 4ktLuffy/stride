@@ -256,6 +256,41 @@ can be reproduced or disputed later.
 
 ---
 
+## Validated on hardware
+
+Second run, 1x and 2x L40S 48 GB and 4x H100 80 GB, Llama-3.1-8B and 70B BF16.
+All three originally suspected GPU bugs are resolved: one was real, two were
+artefacts of comparing generated text.
+
+| | |
+|---|---|
+| Paged attention, decode contract | verified against the reference to 64 pages, max error 7.4e-6 |
+| Paged attention, prefill-shaped input | refused, as it must be |
+| Chunked prefill equivalence | equivalent, max logit error 7.8e-6 across ten 512-token chunks |
+| Tensor parallelism, 8B tp=1 vs tp=2 | equivalent, min cosine 0.99999964, zero decisive disagreements |
+| Tensor parallelism, 70B tp=4 | equivalent, min cosine 0.9999988 |
+| Preemption under load | 386 preemptions, 386 resumptions, no starvation, no deadlock |
+| Prefix reuse under pressure | shared blocks stay resident, no stale hits |
+
+The diagnostics were also checked in the failing direction on hardware: an
+injected structural change was caught and localised to the layer it was
+injected at; noise at 1e-5 passed. Green in both directions, not just green.
+
+**One caveat on the 70B result.** It compared tp=4 against a reference that
+reconstructs through the same partition path, so a fault in the sharding would
+appear on both sides and cancel. The 8B tp=1 vs tp=2 comparison is the one that
+independently validates the sharding code; the 70B run confirms it survives at
+scale and at tp=4. A stronger 70B check available on the same node is **tp=2 vs
+tp=4** — 70B in BF16 is about 70 GiB per rank at tp=2, which fits an 80 GiB
+card, and the two configurations shard at different boundaries with different
+collective sizes.
+
+Throughput figures from that run (~2.05k aggregate tok/s at 128 concurrent on
+4x H100) are the tester's measurements, reproduced here as reported. They have
+not been independently confirmed.
+
+---
+
 ## Findings from the first hardware run
 
 Reported against 1x and 2x L40S 48 GB with Llama-3.1-8B-Instruct. Passing:

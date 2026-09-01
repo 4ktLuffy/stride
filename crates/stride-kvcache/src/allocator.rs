@@ -27,6 +27,13 @@ impl BlockId {
 pub struct BlockAllocator {
     free: Vec<BlockId>,
     refcount: Vec<u32>,
+    /// Blocks with a non-zero reference count, tracked as they change.
+    ///
+    /// Counted rather than derived. Deriving it as `capacity - free - cached`
+    /// makes the partition identity true by construction, which turns the
+    /// invariant check into an assertion that cannot fail — and an accounting
+    /// drift then has nothing standing in its way.
+    live: usize,
 }
 
 impl BlockAllocator {
@@ -35,6 +42,7 @@ impl BlockAllocator {
         Self {
             free: (0..capacity).rev().map(|i| BlockId(i as u32)).collect(),
             refcount: vec![0; capacity],
+            live: 0,
         }
     }
 
@@ -52,6 +60,18 @@ impl BlockAllocator {
         self.capacity() - self.num_free()
     }
 
+    /// Blocks referenced by at least one holder.
+    pub fn num_live(&self) -> usize {
+        self.live
+    }
+
+    /// Recount from the reference table. O(capacity), for tests and debug
+    /// assertions that need a figure the running counter cannot have drifted
+    /// from — a counter checked against itself proves nothing.
+    pub fn recount_live(&self) -> usize {
+        self.refcount.iter().filter(|&&rc| rc > 0).count()
+    }
+
     pub fn refcount(&self, block: BlockId) -> u32 {
         self.refcount[block.index()]
     }
@@ -65,6 +85,7 @@ impl BlockAllocator {
         let block = self.free.pop()?;
         debug_assert_eq!(self.refcount[block.index()], 0);
         self.refcount[block.index()] = 1;
+        self.live += 1;
         Some(block)
     }
 
@@ -77,6 +98,7 @@ impl BlockAllocator {
             "adopt is only for unreferenced blocks"
         );
         self.refcount[block.index()] = 1;
+        self.live += 1;
     }
 
     /// Take an additional reference to a live block.
@@ -93,7 +115,11 @@ impl BlockAllocator {
         let rc = &mut self.refcount[block.index()];
         debug_assert!(*rc > 0, "double free of block {block:?}");
         *rc -= 1;
-        *rc
+        let now = *rc;
+        if now == 0 {
+            self.live -= 1;
+        }
+        now
     }
 
     /// Return an unreferenced block to the free list.
@@ -140,6 +166,36 @@ mod tests {
         assert!(a.is_live(b), "still held by one owner");
         assert_eq!(a.decref(b), 0);
         assert!(!a.is_live(b));
+    }
+
+    #[test]
+    fn the_live_counter_tracks_the_reference_table() {
+        let mut a = BlockAllocator::new(8);
+        let blocks: Vec<_> = (0..5).map(|_| a.take_free().unwrap()).collect();
+        assert_eq!(a.num_live(), 5);
+        assert_eq!(a.num_live(), a.recount_live());
+
+        // Extra references do not add to the live count; the block is already live.
+        a.incref(blocks[0]);
+        a.incref(blocks[0]);
+        assert_eq!(a.num_live(), 5, "a shared block is one live block");
+        assert_eq!(a.num_live(), a.recount_live());
+
+        a.decref(blocks[0]);
+        a.decref(blocks[0]);
+        assert_eq!(a.num_live(), 5, "still held by its last owner");
+        a.decref(blocks[0]);
+        assert_eq!(a.num_live(), 4);
+        assert_eq!(a.num_live(), a.recount_live());
+
+        // And through a free/adopt round trip.
+        a.push_free(blocks[0]);
+        let again = a.take_free().unwrap();
+        assert_eq!(a.num_live(), 5);
+        a.decref(again);
+        a.adopt(again);
+        assert_eq!(a.num_live(), 5);
+        assert_eq!(a.num_live(), a.recount_live());
     }
 
     #[test]
