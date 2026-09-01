@@ -91,6 +91,10 @@ class StrideModel:
         self.device = device
         self.dtype = dtype
         self.ctx = ctx or ParallelContext(0, 1, 0, device, None)
+        #: When set to a list, each layer appends its output hidden state.
+        #: Used by the diagnostics to locate the first layer at which two
+        #: configurations diverge; None in serving, where it would be pure cost.
+        self.capture: list[torch.Tensor] | None = None
         tp = self.ctx.world_size
         rank = self.ctx.rank
 
@@ -305,7 +309,12 @@ class StrideModel:
             )
             x = x + all_reduce(mlp_out, self.ctx)
 
+            if self.capture is not None:
+                self.capture.append(x.detach().float().cpu())
+
         x = rms_norm(x, self.final_norm, self.eps)
+        if self.capture is not None:
+            self.capture.append(x.detach().float().cpu())
 
         # Only the final token of each sequence that asked for logits is run
         # through the vocabulary projection. On a 128k vocabulary that is the

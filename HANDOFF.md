@@ -205,17 +205,45 @@ cargo run --release -p stride-server --bin stride -- \
   --worker 127.0.0.1:9000 --tokenizer /path/to/Llama-3.1-8B-Instruct
 ```
 
-Compare the output against step 4 with the same seed and prompt. **Tensor
-parallelism must not change what the model says** — it changes where the
-arithmetic happens, not what it computes. Small floating-point differences in
-the last decimal are expected; a different sentence means the sharding is wrong,
-and the most likely culprit is a missing all-reduce or a projection split along
-the wrong axis.
-
 Watch `nvidia-smi` during a run: every card should show utilisation. If only
 one does, the followers are stuck in `receive_work` and never got the broadcast.
 
-### 6. Kernel autotuning, one GPU
+**Do not compare generated text between tp=1 and tp=2.** An earlier version of
+this document told you to, and that instruction was wrong. Splitting a matmul
+changes the order of a floating-point reduction, floating-point addition is not
+associative, and greedy decoding takes an argmax — so at any near-tie, a
+difference far below bf16 precision flips one token, and every token after it
+diverges. Correct tensor parallelism produces different text. So does broken
+tensor parallelism. The comparison cannot tell them apart.
+
+Compare hidden states instead:
+
+```bash
+python -m stride_worker.diagnose.cli tp-dump --model CKPT --out tp1.pt
+torchrun --nproc_per_node=2 -m stride_worker.diagnose.cli tp-dump --model CKPT --out tp2.pt
+python -m stride_worker.diagnose.cli tp-compare tp1.pt tp2.pt
+```
+
+This reports the **first** layer at which the two runs stop agreeing, which is
+the only informative one — error compounds, so by the last layer everything
+disagrees and tells you nothing about where the fault is. It also states
+whether the final logits differ by more than reduction-order noise, and says so
+explicitly when they do not.
+
+### 6. Diagnostics when something looks wrong
+
+```bash
+stride-diagnose prefill   --model CKPT --tokens 5000 --chunk 512,1024,2048
+stride-diagnose attention --contexts 16,32,64,256,1024,4096
+```
+
+`prefill` compares a continuous prefill against chunked prefills of the same
+prompt, on logits rather than text. `attention` sweeps the paged-attention
+kernel against the PyTorch reference across growing contexts, so the answer is
+a boundary — "agrees to 4 pages, diverges at 5" — rather than a bare fail, and
+asserts the kernel refuses prefill-shaped input.
+
+### 7. Kernel autotuning, one GPU
 
 ```bash
 stride-autotune rmsnorm --device cuda --dtype bfloat16 --out rmsnorm.json --verbose
@@ -225,6 +253,48 @@ Explores 75 configurations, gates each against the PyTorch reference before
 timing it, and reports a Pareto front over latency and peak memory. The report
 records the device, driver, library versions, seed and shapes, so a number in it
 can be reproduced or disputed later.
+
+---
+
+## Findings from the first hardware run
+
+Reported against 1x and 2x L40S 48 GB with Llama-3.1-8B-Instruct. Passing:
+the Rust control plane, the simulator, prefix caching and tenant isolation, the
+autotuner gate (8/8 controls rejected), CUDA init, weight loading, generation,
+and the RMSNorm and W4A16 kernels.
+
+**1. Paged attention is decode-only, and did not say so. Fixed.**
+
+Measured cosine against the PyTorch reference: ~0.9999 for a single query at
+the end of a short context, ~0.997 with more KV pages, worse under chunked
+prefill.
+
+That gradient is the whole diagnosis. The kernel takes `q` of shape
+`(num_seqs, num_q_heads, head_dim)` — one query token per sequence — and
+contains no `query_start` and no causal mask. For decode that is correct: the
+single query sits at the end and may attend to everything. Give it several
+query positions and every query attends to its own future, so the error grows
+with the number of keys that should have been masked. Not arithmetic drift; a
+missing capability being silently misused.
+
+The kernel now raises `NotADecodeStep` rather than computing. A prefill-capable
+variant needs a query-position argument and a mask, and is not written.
+
+**2. Chunked prefill and tensor parallelism: not yet established either way.**
+
+Both were reported as generated text differing from a reference run. That
+comparison cannot settle it, for the reason given in step 5 — and the
+instruction to make it was mine. `stride-diagnose prefill` and the `tp-dump` /
+`tp-compare` pair ask the question properly, on logits and hidden states.
+
+Two outcomes are possible and they need different responses. If the diagnostics
+report equivalence, there is no bug and the differing text was decoding
+amplifying noise. If they report divergence, `tp-compare` names the first bad
+layer and `prefill` names the chunk size at which agreement breaks.
+
+**3. 70B was correctly not benchmarked.** Publishing throughput for a runtime
+whose numerics are unresolved would produce a number that is precise and
+meaningless. The right call.
 
 ---
 

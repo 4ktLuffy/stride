@@ -58,6 +58,8 @@ jobs:
           python -c "import stride_worker.model, stride_worker.worker"
           python -c "import stride_worker.kernels.rmsnorm, stride_worker.kernels.paged_attn, stride_worker.kernels.w4a16"
           python -c "import stride_worker.autotune.gate, stride_worker.autotune.search"
+          python -c "import stride_worker.distributed, stride_worker.diagnose.equivalence"
+          python -c "import stride_worker.diagnose.prefill, stride_worker.diagnose.tp, stride_worker.diagnose.attention"
 
       # The load-bearing check: the gate must reject every known-broken kernel.
       # If this passes vacuously, nothing the gate ever approves means anything.

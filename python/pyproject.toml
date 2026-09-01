@@ -17,6 +17,7 @@ dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
 [project.scripts]
 stride-worker = "stride_worker.worker:main"
 stride-autotune = "stride_worker.autotune.cli:main"
+stride-diagnose = "stride_worker.diagnose.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
