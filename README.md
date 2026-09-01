@@ -9,13 +9,25 @@ shape fits on the hardware you have. It targets large dense and
 Mixture-of-Experts transformers — 70B and 405B dense, 8x22B MoE — rather than
 small models that fit comfortably on one card.
 
-**Status: in development.** The control plane — memory, scheduling, planning,
-sampling, streaming and the HTTP API — is implemented and runs end to end. The
-GPU worker and the Triton kernels are written but have never been executed,
-because they were developed on a machine with no CUDA device.
+**Status: in development, and validated on hardware.** The full path — control
+plane, GPU worker, Triton kernels and tensor parallelism over NCCL — has been
+exercised on Llama-3.1-8B and 70B across 1x and 2x L40S 48 GB and 4x H100 80 GB.
 
-**[HANDOFF.md](HANDOFF.md) states component by component what has run and what
-has not**, and gives the order to bring it up on real hardware.
+| Checked on hardware | Result |
+|---|---|
+| Paged attention against the PyTorch reference, to 64 pages | max error 7.4e-6 |
+| Chunked prefill vs continuous, ten 512-token chunks | equivalent, max logit error 7.8e-6 |
+| Tensor parallelism, 8B, tp=1 vs tp=2 | equivalent, min cosine 0.99999964 |
+| Tensor parallelism, 70B, tp=4 | equivalent, min cosine 0.9999988 |
+| Preemption under sustained load | 386 preemptions, 386 resumptions, no starvation or deadlock |
+| Prefix reuse under memory pressure | shared blocks stay resident, no stale hits |
+
+Those figures were measured by a second engineer on their own hardware and are
+reproduced as reported; they have not been independently confirmed here. No
+throughput number is claimed anywhere in this repository.
+
+**[HANDOFF.md](HANDOFF.md) has the component-by-component detail**, including
+what is still unbuilt and the order to bring the runtime up on a new machine.
 
 ---
 
@@ -54,8 +66,16 @@ Every block is in exactly one of three states — live, cached, or free — and 
 cached block is deliberately kept off the free list. If it were on it, an
 allocation could hand it out while the index still pointed at it, and a later
 cache hit would read another sequence's attention state. The partition makes
-that class of bug unrepresentable, and the tests assert it after every
-operation.
+that class of bug unrepresentable.
+
+The three counts are maintained by the structures that own them and never
+derived from one another, so `assert_invariants` — which runs after every
+scheduler step in debug builds — can actually fail. An earlier version computed
+`live` as `capacity - free - cached`, which made the partition identity
+algebraically true: the check ran constantly and could not detect anything. It
+was replaced after a 70B run surfaced a cache-accounting drift that no test had
+caught, and the corrected check immediately found a second instance of the same
+class.
 
 ### `stride-sched` — continuous batching against deadlines
 
@@ -188,8 +208,18 @@ there is more than one GPU — the sharding lives entirely below that seam.
 
 The sharding *math* is verified on CPU: each test splits a real attention block
 or MLP by hand, performs the collective by summing the shards directly, and
-requires the result to match the unsharded computation. NCCL itself needs
-hardware.
+requires the result to match the unsharded computation. The NCCL path itself is
+verified on hardware — 8B at tp=1 against tp=2, and 70B at tp=4 — by comparing
+per-layer hidden states rather than generated text.
+
+That distinction cost a day of someone's time and is worth stating plainly.
+Splitting a matmul changes the order of a floating-point reduction, addition is
+not associative, and greedy decoding takes an argmax — so at any near-tie a
+difference far below bf16 precision flips one token and every token after it
+diverges. Correct tensor parallelism produces different text. So does broken
+tensor parallelism. `stride-diagnose` compares logits and hidden states, and
+reports the *first* divergent layer, because error compounds and the last layer
+says nothing about where the fault is.
 
 ---
 
