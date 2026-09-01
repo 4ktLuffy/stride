@@ -32,15 +32,26 @@ import torch
 #: Cosine similarity below which two logit vectors are not the same
 #: computation, per dtype. Above the threshold the difference is consistent
 #: with reduction-order noise; below it, something structural differs.
+#:
+#: Every floor must sit below what *identical* input scores, or the metric
+#: rejects a perfect match. It is checked against itself in the test suite,
+#: because a comparison that cannot recognise identity is worse than no
+#: comparison — it would send someone hunting a bug that is not there.
 COSINE_FLOOR: dict[torch.dtype, float] = {
-    torch.float32: 0.999999,
+    torch.float32: 0.9999999,
     torch.bfloat16: 0.9995,
     torch.float16: 0.9998,
 }
 
-#: How often the argmax may legitimately disagree. Not zero: genuine near-ties
-#: exist, and at a tie the winner is decided by noise in either run.
-ARGMAX_TOLERANCE = 0.02
+#: A top-1 to top-2 margin wider than this is a decision, not a coin flip.
+#: Logit gaps below it are within reach of reduction-order noise, so an argmax
+#: that lands the other way there says nothing.
+DECISIVE_GAP = 0.05
+
+#: How often the two runs may rank different tokens first *at a decisive
+#: margin*. Disagreements at ties are not counted at all — a run where every
+#: position is an exact tie legitimately agrees on nothing.
+DECISIVE_DISAGREEMENT_TOLERANCE = 0.01
 
 
 @dataclass
@@ -54,32 +65,35 @@ class Agreement:
     #: means the runs disagreed at a near-tie, which is expected. A large one
     #: means they genuinely ranked different tokens first.
     worst_disagreement_gap: float
+    #: Share of positions where the argmax disagreed *and* the reference was
+    #: decisive about it. This is the number that matters; the raw argmax rate
+    #: is reported for context but must not be judged on its own.
+    decisive_disagreement_rate: float
 
     def verdict(self, dtype: torch.dtype = torch.bfloat16) -> tuple[bool, str]:
         floor = COSINE_FLOOR.get(dtype, 0.999)
 
         if self.cosine < floor:
             return False, (
-                f"cosine {self.cosine:.6f} is below {floor} for {dtype}. The two "
+                f"cosine {self.cosine:.7f} is below {floor} for {dtype}. The two "
                 "runs are not computing the same function — this is not "
                 "reduction-order noise."
             )
-        if 1.0 - self.argmax_match_rate > ARGMAX_TOLERANCE:
+        # Judged on decisive disagreements only. Grading the raw argmax rate
+        # would fail a run whose positions are genuine ties, where neither
+        # answer is more correct than the other.
+        if self.decisive_disagreement_rate > DECISIVE_DISAGREEMENT_TOLERANCE:
             return False, (
-                f"argmax agreed on only {self.argmax_match_rate:.1%} of positions. "
-                "Logits are close but the ranking differs too often to be ties."
-            )
-        if self.worst_disagreement_gap > 0.5:
-            return False, (
-                f"argmax disagreed where the top two logits were {self.worst_disagreement_gap:.3f} "
-                "apart. That is not a near-tie; the runs genuinely ranked "
-                "different tokens first."
+                f"{self.decisive_disagreement_rate:.1%} of positions ranked a "
+                f"different token first at a margin above {DECISIVE_GAP}. That is "
+                "a different computation, not a tie broken the other way."
             )
         return True, (
-            f"equivalent: cosine {self.cosine:.6f}, argmax agrees "
-            f"{self.argmax_match_rate:.1%}, disagreements only at gaps up to "
-            f"{self.worst_disagreement_gap:.4f}. Consistent with reduction-order "
-            "noise, which is expected and not a defect."
+            f"equivalent: cosine {self.cosine:.7f}, argmax agrees "
+            f"{self.argmax_match_rate:.1%}, and every disagreement sits at a "
+            f"margin of at most {self.worst_disagreement_gap:.4f}. Consistent "
+            "with reduction-order noise, which correct tensor parallelism "
+            "produces and which is not a defect."
         )
 
 
@@ -87,8 +101,12 @@ def compare_logits(a: torch.Tensor, b: torch.Tensor) -> Agreement:
     """Compare two (positions, vocab) logit tensors from identical input."""
     if a.shape != b.shape:
         raise ValueError(f"shape mismatch: {tuple(a.shape)} vs {tuple(b.shape)}")
-    a32 = a.detach().float().cpu()
-    b32 = b.detach().float().cpu()
+    # Compared in float64. In float32 the cosine of a tensor with itself comes
+    # out at about 1 - 2e-7, which sits below the float32 floor — the metric
+    # would lose precision measuring identity and call a perfect match
+    # divergent.
+    a32 = a.detach().double().cpu()
+    b32 = b.detach().double().cpu()
     if a32.ndim == 1:
         a32, b32 = a32.unsqueeze(0), b32.unsqueeze(0)
 
@@ -109,13 +127,16 @@ def compare_logits(a: torch.Tensor, b: torch.Tensor) -> Agreement:
         for i in range(a32.shape[0])
     ) / a32.shape[0]
 
-    # At each disagreement, how decisive was the reference? A tie is forgivable.
+    # At each disagreement, how decisive was the reference? A tie is forgivable;
+    # a wide margin is not.
     worst_gap = 0.0
-    if (~matches).any():
-        top2 = a32.topk(min(2, a32.shape[-1]), dim=-1).values
-        if top2.shape[-1] == 2:
-            gaps = (top2[:, 0] - top2[:, 1])[~matches]
-            worst_gap = float(gaps.max()) if gaps.numel() else 0.0
+    decisive_rate = 0.0
+    if (~matches).any() and a32.shape[-1] >= 2:
+        top2 = a32.topk(2, dim=-1).values
+        gaps = (top2[:, 0] - top2[:, 1])[~matches]
+        if gaps.numel():
+            worst_gap = float(gaps.max())
+            decisive_rate = float((gaps > DECISIVE_GAP).sum()) / a32.shape[0]
 
     return Agreement(
         n=a32.shape[0],
@@ -124,6 +145,7 @@ def compare_logits(a: torch.Tensor, b: torch.Tensor) -> Agreement:
         argmax_match_rate=match_rate,
         top5_overlap=float(overlap),
         worst_disagreement_gap=worst_gap,
+        decisive_disagreement_rate=decisive_rate,
     )
 
 
@@ -152,7 +174,7 @@ def first_divergence(
             return LayerDivergence(index, 0.0, float("inf"))
         cos = float(
             torch.nn.functional.cosine_similarity(
-                x.float().flatten(0, -2), y.float().flatten(0, -2), dim=-1
+                x.double().flatten(0, -2), y.double().flatten(0, -2), dim=-1
             ).min()
         )
         if cos < cosine_floor:
@@ -165,11 +187,12 @@ def report(name: str, agreement: Agreement, dtype: torch.dtype) -> str:
     lines = [
         f"{name}: {'EQUIVALENT' if ok else 'DIVERGENT'}",
         f"  positions compared      {agreement.n}",
-        f"  cosine similarity       {agreement.cosine:.8f}",
+        f"  cosine similarity       {agreement.cosine:.9f}",
         f"  max absolute difference {agreement.max_abs_diff:.3e}",
         f"  argmax agreement        {agreement.argmax_match_rate:.2%}",
         f"  top-5 overlap           {agreement.top5_overlap:.2%}",
         f"  worst disagreement gap  {agreement.worst_disagreement_gap:.4f}",
+        f"  decisive disagreements  {agreement.decisive_disagreement_rate:.2%}",
         f"  {reason}",
     ]
     return "\n".join(lines)
