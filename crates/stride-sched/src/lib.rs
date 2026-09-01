@@ -292,7 +292,9 @@ impl Scheduler {
             {
                 break;
             }
-            let Some(seq) = self.seqs.get(&id) else { continue };
+            let Some(seq) = self.seqs.get(&id) else {
+                continue;
+            };
             if seq.state != SequenceState::Decoding {
                 continue;
             }
@@ -453,7 +455,9 @@ impl Scheduler {
                 let first = seq.first_token_at.is_none();
                 seq.push_token(token, now);
                 if first {
-                    let missed = seq.ttft_us().is_some_and(|t| t > seq.class.ttft_budget_us());
+                    let missed = seq
+                        .ttft_us()
+                        .is_some_and(|t| t > seq.class.ttft_budget_us());
                     if missed {
                         self.metrics.ttft_deadline_misses += 1;
                     }

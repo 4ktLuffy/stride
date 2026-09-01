@@ -19,18 +19,18 @@ impl ServiceClass {
     /// Time-to-first-token budget in microseconds.
     pub const fn ttft_budget_us(self) -> Tick {
         match self {
-            ServiceClass::Interactive => 500_000,     // 500 ms
-            ServiceClass::Batch => 10_000_000,        // 10 s
-            ServiceClass::Background => 120_000_000,  // 2 min
+            ServiceClass::Interactive => 500_000,    // 500 ms
+            ServiceClass::Batch => 10_000_000,       // 10 s
+            ServiceClass::Background => 120_000_000, // 2 min
         }
     }
 
     /// Per-token budget once generation has started, in microseconds.
     pub const fn itl_budget_us(self) -> Tick {
         match self {
-            ServiceClass::Interactive => 50_000,     // 50 ms
-            ServiceClass::Batch => 200_000,          // 200 ms
-            ServiceClass::Background => 1_000_000,   // 1 s
+            ServiceClass::Interactive => 50_000,   // 50 ms
+            ServiceClass::Batch => 200_000,        // 200 ms
+            ServiceClass::Background => 1_000_000, // 1 s
         }
     }
 }

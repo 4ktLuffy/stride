@@ -63,20 +63,20 @@ impl ParallelConfig {
             return Err("parallel degrees must be at least 1".into());
         }
         let a = &model.attention;
-        if a.num_q_heads % self.tensor != 0 {
+        if !a.num_q_heads.is_multiple_of(self.tensor) {
             return Err(format!(
                 "tp={}: {} query heads do not divide evenly",
                 self.tensor, a.num_q_heads
             ));
         }
-        if a.num_kv_heads % self.tensor != 0 {
+        if !a.num_kv_heads.is_multiple_of(self.tensor) {
             return Err(format!(
                 "tp={}: {} KV heads do not divide evenly. Either lower tp, or \
                  replicate KV heads and accept the duplicated cache",
                 self.tensor, a.num_kv_heads
             ));
         }
-        if model.num_layers % self.pipeline != 0 {
+        if !model.num_layers.is_multiple_of(self.pipeline) {
             return Err(format!(
                 "pp={}: {} layers do not divide evenly",
                 self.pipeline, model.num_layers
@@ -143,15 +143,13 @@ impl ParallelConfig {
             }
         };
 
-        let per_layer = sharded_by_tp / self.tensor as u64
-            + sharded_by_ep / self.expert as u64
-            + replicated;
+        let per_layer =
+            sharded_by_tp / self.tensor as u64 + sharded_by_ep / self.expert as u64 + replicated;
         let layers_here = (model.num_layers / self.pipeline) as u64;
 
-        let embeddings = if model.tie_word_embeddings { 1 } else { 2 }
-            * model.vocab_size as u64
-            * h
-            / self.tensor as u64;
+        let embeddings =
+            if model.tie_word_embeddings { 1 } else { 2 } * model.vocab_size as u64 * h
+                / self.tensor as u64;
 
         let params = per_layer * layers_here + embeddings;
         model.weights.bytes_for(params as usize) as u64

@@ -160,7 +160,8 @@ impl Sequence {
 
     /// Time-to-first-token, once the first token has been emitted.
     pub fn ttft_us(&self) -> Option<Tick> {
-        self.first_token_at.map(|t| t.saturating_sub(self.arrived_at))
+        self.first_token_at
+            .map(|t| t.saturating_sub(self.arrived_at))
     }
 
     /// Mean inter-token latency across the generated tokens.

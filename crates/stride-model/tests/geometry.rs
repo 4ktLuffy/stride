@@ -6,7 +6,9 @@
 //! count rather than against another part of this crate.
 
 use stride_model::config::FeedForward;
-use stride_model::{presets, DType, MemoryPlan, ModelConfig, ParallelConfig, PlanError, WeightFormat};
+use stride_model::{
+    presets, DType, MemoryPlan, ModelConfig, ParallelConfig, PlanError, WeightFormat,
+};
 
 /// Assert `got` is within `pct` percent of `want`.
 fn near(got: u64, want: f64, pct: f64, what: &str) {
@@ -22,9 +24,24 @@ fn near(got: u64, want: f64, pct: f64, what: &str) {
 
 #[test]
 fn dense_parameter_counts_match_published_sizes() {
-    near(presets::llama3_8b().total_params(), 8.03e9, 1.0, "llama-3.1-8b");
-    near(presets::llama3_70b().total_params(), 70.6e9, 1.0, "llama-3.1-70b");
-    near(presets::llama3_405b().total_params(), 405.8e9, 1.0, "llama-3.1-405b");
+    near(
+        presets::llama3_8b().total_params(),
+        8.03e9,
+        1.0,
+        "llama-3.1-8b",
+    );
+    near(
+        presets::llama3_70b().total_params(),
+        70.6e9,
+        1.0,
+        "llama-3.1-70b",
+    );
+    near(
+        presets::llama3_405b().total_params(),
+        405.8e9,
+        1.0,
+        "llama-3.1-405b",
+    );
 }
 
 #[test]
@@ -132,7 +149,9 @@ fn rejects_expert_parallelism_on_a_dense_model() {
 fn expert_parallelism_shards_expert_weights_off_each_rank() {
     let m = presets::mixtral_8x22b();
     let tp_only = ParallelConfig::tp(8).weight_bytes_per_rank(&m);
-    let tp_and_ep = ParallelConfig::tp(8).with_expert(8).weight_bytes_per_rank(&m);
+    let tp_and_ep = ParallelConfig::tp(8)
+        .with_expert(8)
+        .weight_bytes_per_rank(&m);
     assert!(
         tp_and_ep < tp_only,
         "ep=8 must move expert weights off each rank: {tp_and_ep} vs {tp_only}"
@@ -142,7 +161,10 @@ fn expert_parallelism_shards_expert_weights_off_each_rank() {
 #[test]
 fn collectives_are_reported_for_each_plan_dimension() {
     let m = presets::mixtral_8x22b();
-    let ops = ParallelConfig::tp(4).with_pipeline(2).with_expert(8).describe_collectives(&m);
+    let ops = ParallelConfig::tp(4)
+        .with_pipeline(2)
+        .with_expert(8)
+        .describe_collectives(&m);
     assert_eq!(ops.len(), 3, "tp, pp and ep each add traffic: {ops:?}");
     assert!(ParallelConfig::default().describe_collectives(&m)[0].contains("single-rank"));
 }
@@ -214,7 +236,10 @@ fn four_bit_weights_cost_more_than_four_bits_once_scales_are_counted() {
         bits > 4.0,
         "group scales and zero points are not free, got {bits:.3} bits"
     );
-    assert!(bits < 4.5, "but they should stay under 4.5 bits, got {bits:.3}");
+    assert!(
+        bits < 4.5,
+        "but they should stay under 4.5 bits, got {bits:.3}"
+    );
 }
 
 // --- config.json parsing ----------------------------------------------------
@@ -261,7 +286,11 @@ fn detects_a_mixture_of_experts_checkpoint() {
     assert!(cfg.ffn.is_moe());
     assert!(matches!(
         cfg.ffn,
-        FeedForward::Moe { num_experts: 8, experts_per_token: 2, .. }
+        FeedForward::Moe {
+            num_experts: 8,
+            experts_per_token: 2,
+            ..
+        }
     ));
     assert!(cfg.total_params() > 3 * cfg.active_params());
 }

@@ -50,7 +50,10 @@ fn a_request_runs_to_its_token_limit_and_reports_latency() {
     let f = &done[0];
     assert_eq!(f.output.len(), 8, "exactly max_tokens generated");
     assert!(f.ttft_us.is_some(), "time-to-first-token must be recorded");
-    assert!(f.mean_itl_us.is_some(), "inter-token latency must be recorded");
+    assert!(
+        f.mean_itl_us.is_some(),
+        "inter-token latency must be recorded"
+    );
     assert_eq!(s.num_running(), 0);
     assert_eq!(s.num_waiting(), 0);
 }
@@ -112,7 +115,10 @@ fn decoding_continues_while_a_long_prompt_is_prefilled() {
         s.on_tokens(&outputs, now);
         now += STEP_US;
     }
-    assert!(steps_with_prefill > 4, "the big prompt should span many steps");
+    assert!(
+        steps_with_prefill > 4,
+        "the big prompt should span many steps"
+    );
     assert!(
         decodes_during_prefill >= steps_with_prefill,
         "the running sequence must keep emitting tokens throughout the prefill \
@@ -167,7 +173,10 @@ fn a_fresh_interactive_request_outranks_a_fresh_background_one() {
         .unwrap()[0];
 
     let batch = s.step(0);
-    assert_eq!(batch.prefill[0].seq, inter, "tighter deadline wins on a tie");
+    assert_eq!(
+        batch.prefill[0].seq, inter,
+        "tighter deadline wins on a tie"
+    );
     assert_ne!(batch.prefill[0].seq, bg);
 }
 
@@ -223,7 +232,10 @@ fn a_shared_system_prompt_is_reused_by_later_requests() {
     drive(&mut s, 16, &mut now);
 
     let before = s.metrics();
-    assert_eq!(before.prefill_tokens_reused, 0, "nothing to reuse on a cold start");
+    assert_eq!(
+        before.prefill_tokens_reused, 0,
+        "nothing to reuse on a cold start"
+    );
 
     // A second request carrying the same system prompt plus its own suffix.
     let followup: Vec<u32> = system.iter().copied().chain(900..932).collect();
@@ -274,7 +286,11 @@ fn the_token_budget_is_never_exceeded() {
     }
     for _ in 0..200 {
         let batch = s.step(now);
-        assert!(batch.num_tokens() <= 64, "budget breached: {}", batch.num_tokens());
+        assert!(
+            batch.num_tokens() <= 64,
+            "budget breached: {}",
+            batch.num_tokens()
+        );
         assert!(batch.num_seqs() <= 8, "sequence cap breached");
         let outputs: Vec<_> = batch.decode.iter().map(|&id| (id, FILLER)).collect();
         s.on_tokens(&outputs, now);

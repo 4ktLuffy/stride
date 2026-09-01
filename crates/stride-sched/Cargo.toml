@@ -2,6 +2,7 @@
 name = "stride-sched"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Continuous-batching, SLO-aware request scheduler."

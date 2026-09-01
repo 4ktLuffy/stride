@@ -126,7 +126,7 @@ impl KvCache {
     pub fn acquire_prefix(&mut self, tenant: &str, tokens: &[TokenId]) -> PrefixMatch {
         let hashes = hash::chain(tenant, tokens, self.block_size);
         // Never consume the block that ends exactly at the prompt's last token.
-        let ceiling = if tokens.len() % self.block_size == 0 {
+        let ceiling = if tokens.len().is_multiple_of(self.block_size) {
             hashes.len().saturating_sub(1)
         } else {
             hashes.len()

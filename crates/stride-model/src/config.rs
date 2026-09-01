@@ -150,9 +150,7 @@ impl ModelConfig {
     pub fn active_params(&self) -> u64 {
         let h = self.hidden_size as u64;
         let a = &self.attention;
-        let attn = h * a.q_dim() as u64
-            + 2 * h * a.kv_dim() as u64
-            + a.q_dim() as u64 * h;
+        let attn = h * a.q_dim() as u64 + 2 * h * a.kv_dim() as u64 + a.q_dim() as u64 * h;
         (attn + self.ffn.active_params(self.hidden_size)) * self.num_layers as u64
             + self.embedding_params()
     }
@@ -169,8 +167,7 @@ impl ModelConfig {
     /// elements. This is the number that decides how much context a deployment
     /// can hold, and it is why grouped-query attention matters at scale.
     pub fn kv_bytes_per_token(&self) -> u64 {
-        2 * self.num_layers as u64
-            * self.kv_dtype.bytes_for(self.attention.kv_dim()) as u64
+        2 * self.num_layers as u64 * self.kv_dtype.bytes_for(self.attention.kv_dim()) as u64
     }
 
     /// FLOPs for one token of decode, counting a multiply-add as two.
@@ -183,7 +180,11 @@ impl ModelConfig {
         if self.attention.num_kv_heads == 0 || self.attention.num_q_heads == 0 {
             return Err("attention must have at least one query and KV head".into());
         }
-        if self.attention.num_q_heads % self.attention.num_kv_heads != 0 {
+        if !self
+            .attention
+            .num_q_heads
+            .is_multiple_of(self.attention.num_kv_heads)
+        {
             return Err(format!(
                 "{}: {} query heads do not divide evenly into {} KV heads",
                 self.name, self.attention.num_q_heads, self.attention.num_kv_heads
@@ -209,7 +210,11 @@ impl ModelConfig {
     ///
     /// Prefer this over a preset. The checkpoint is the source of truth, and a
     /// preset that has drifted from it mis-sizes the KV cache silently.
-    pub fn from_hf_config(json: &str, weights: WeightFormat, kv_dtype: DType) -> Result<Self, String> {
+    pub fn from_hf_config(
+        json: &str,
+        weights: WeightFormat,
+        kv_dtype: DType,
+    ) -> Result<Self, String> {
         let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
         let get_usize = |k: &str| -> Result<usize, String> {
             v.get(k)

@@ -182,9 +182,7 @@ pub fn decode_bandwidth_ceiling_tokens_per_s(
     parallel: ParallelConfig,
     gpu: GpuProfile,
 ) -> f64 {
-    let active_bytes_per_rank = model
-        .weights
-        .bytes_for(model.active_params() as usize) as f64
+    let active_bytes_per_rank = model.weights.bytes_for(model.active_params() as usize) as f64
         / parallel.world_size() as f64;
     if active_bytes_per_rank <= 0.0 {
         return 0.0;

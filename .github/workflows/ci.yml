@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      # Debug assertions are load-bearing here: the KV cache checks its
+      # live/cached/free partition on every scheduler step under cfg(debug).
+      - name: Test (debug assertions on)
+        run: cargo test --workspace
+
+      - name: Test (release)
+        run: cargo test --workspace --release
+
+      - name: Capacity planner runs
+        run: cargo run -p stride-model --example plan

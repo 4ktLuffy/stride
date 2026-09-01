@@ -110,7 +110,9 @@ fn live_blocks_survive_pressure_from_other_sequences() {
     let held: Vec<u32> = (0..32).collect();
 
     let m = c.acquire_prefix("acme", &held);
-    let blocks = c.allocate(c.blocks_for(held.len()) - m.blocks.len()).unwrap();
+    let blocks = c
+        .allocate(c.blocks_for(held.len()) - m.blocks.len())
+        .unwrap();
     c.publish("acme", &held, &blocks);
     // Deliberately do NOT release: this sequence is still generating.
 

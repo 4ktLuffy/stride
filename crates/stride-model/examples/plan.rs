@@ -33,10 +33,7 @@ fn row(model: &ModelConfig, parallel: ParallelConfig, gpu: presets::GpuProfile) 
 
     match MemoryPlan::new(model, parallel, gpu, 16, 0.10) {
         Ok(plan) => {
-            println!(
-                "  weights   {:>8.1} GiB/rank",
-                plan.weight_gib()
-            );
+            println!("  weights   {:>8.1} GiB/rank", plan.weight_gib());
             println!(
                 "  kv cache  {:>8.1} GiB/rank  ({} blocks x 16 tokens)",
                 plan.kv_gib(),
@@ -82,9 +79,21 @@ fn main() {
     println!("\n\nDeployment plans");
     println!("================");
 
-    row(&presets::llama3_8b(), ParallelConfig::tp(1), presets::L40S_48GB);
-    row(&presets::llama3_70b(), ParallelConfig::tp(4), presets::H100_80GB);
-    row(&presets::llama3_405b(), ParallelConfig::tp(8), presets::H100_80GB);
+    row(
+        &presets::llama3_8b(),
+        ParallelConfig::tp(1),
+        presets::L40S_48GB,
+    );
+    row(
+        &presets::llama3_70b(),
+        ParallelConfig::tp(4),
+        presets::H100_80GB,
+    );
+    row(
+        &presets::llama3_405b(),
+        ParallelConfig::tp(8),
+        presets::H100_80GB,
+    );
 
     let mut fp8_405b = presets::llama3_405b();
     fp8_405b.weights = WeightFormat::w8_per_tensor(DType::F8E4M3);

@@ -72,7 +72,8 @@ impl BlockAllocator {
     /// a cache hit reviving a cached block, or a block just evicted.
     pub fn adopt(&mut self, block: BlockId) {
         debug_assert_eq!(
-            self.refcount[block.index()], 0,
+            self.refcount[block.index()],
+            0,
             "adopt is only for unreferenced blocks"
         );
         self.refcount[block.index()] = 1;
@@ -98,13 +99,11 @@ impl BlockAllocator {
     /// Return an unreferenced block to the free list.
     pub fn push_free(&mut self, block: BlockId) {
         debug_assert_eq!(
-            self.refcount[block.index()], 0,
+            self.refcount[block.index()],
+            0,
             "cannot free a referenced block"
         );
-        debug_assert!(
-            !self.free.contains(&block),
-            "block {block:?} freed twice"
-        );
+        debug_assert!(!self.free.contains(&block), "block {block:?} freed twice");
         self.free.push(block);
     }
 }

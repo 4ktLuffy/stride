@@ -201,7 +201,10 @@ mod tests {
         assert!(c.insert(h(1), BlockId(7)));
         assert!(!c.insert(h(1), BlockId(9)), "second writer is refused");
         assert_eq!(c.get(h(1)), Some(BlockId(7)));
-        assert!(!c.contains_block(BlockId(9)), "the duplicate stays unindexed");
+        assert!(
+            !c.contains_block(BlockId(9)),
+            "the duplicate stays unindexed"
+        );
     }
 
     #[test]

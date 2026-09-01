@@ -37,10 +37,7 @@ impl DType {
     /// True for formats that need a scale (and possibly a zero point) per
     /// group of elements rather than one per tensor.
     pub const fn is_quantized(self) -> bool {
-        matches!(
-            self,
-            DType::F8E4M3 | DType::F8E5M2 | DType::I8 | DType::I4
-        )
+        matches!(self, DType::F8E4M3 | DType::F8E5M2 | DType::I8 | DType::I4)
     }
 
     /// Precision that accumulation and reference comparison run in.

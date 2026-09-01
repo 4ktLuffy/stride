@@ -10,6 +10,8 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# int::is_multiple_of, used in the divisibility checks, stabilised in 1.87.
+rust-version = "1.87"
 license = "Apache-2.0"
 repository = "https://github.com/4ktluffy/stride"
 
