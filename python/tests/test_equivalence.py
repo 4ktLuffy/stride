@@ -144,7 +144,12 @@ def test_universal_ties_agree_on_nothing_and_are_still_equivalent():
     a[:, 2] = 3.0
     a[:, 5] = 3.0
     b = a.clone()
-    b[:, 5] += 1e-7
+    # The nudge has to exceed the float32 ULP at this magnitude — about 2.4e-7
+    # at 3.0 — or it rounds away and the tie never breaks. It stays far below
+    # DECISIVE_GAP, so it is still noise as far as the verdict is concerned.
+    b[:, 5] += 1e-4
+
+    assert not torch.equal(a, b), "the perturbation was lost to rounding"
 
     result = compare_logits(a, b)
     assert result.argmax_match_rate == 0.0, "every tie should break the other way"
