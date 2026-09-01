@@ -1,0 +1,11 @@
+[package]
+name = "stride-sched"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Continuous-batching, SLO-aware request scheduler."
+
+[dependencies]
+stride-core.workspace = true
+stride-kvcache.workspace = true

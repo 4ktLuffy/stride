@@ -1,0 +1,10 @@
+[package]
+name = "stride-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core request, sequence and sampling types for the Stride inference runtime."
+
+[dependencies]
+thiserror.workspace = true

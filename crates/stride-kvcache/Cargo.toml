@@ -1,0 +1,11 @@
+[package]
+name = "stride-kvcache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Paged KV-cache allocation with content-addressed prefix reuse."
+
+[dependencies]
+stride-core.workspace = true
+thiserror.workspace = true
