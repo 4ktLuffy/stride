@@ -15,5 +15,7 @@ RUN pip3 install --no-cache-dir \
     && pip3 install --no-cache-dir -e .
 
 EXPOSE 9000
-ENTRYPOINT ["python3", "-m", "stride_worker.worker"]
-CMD ["--host", "0.0.0.0", "--port", "9000"]
+# No ENTRYPOINT: the compose file supplies either `python3 -m stride_worker.worker`
+# for a single GPU or `torchrun --nproc_per_node=N -m stride_worker.worker` to
+# shard across several.
+CMD ["python3", "-m", "stride_worker.worker", "--host", "0.0.0.0", "--port", "9000"]

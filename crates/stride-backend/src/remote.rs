@@ -44,6 +44,10 @@ pub struct WorkerInfo {
     pub head_dim: usize,
     pub num_blocks: usize,
     pub block_size: usize,
+    /// Ranks the worker is sharded across. The control plane addresses one
+    /// worker regardless; this is reported so a mismatch with the planned
+    /// degree is caught rather than silently ignored.
+    pub tensor_parallel_size: usize,
     pub device: String,
     pub dtype: String,
 }
@@ -99,6 +103,7 @@ impl RemoteExecutor {
                 head_dim: 0,
                 num_blocks: 0,
                 block_size: 0,
+                tensor_parallel_size: 1,
                 device: String::new(),
                 dtype: String::new(),
             },
@@ -214,6 +219,11 @@ impl RemoteExecutor {
             head_dim: field("head_dim")?,
             num_blocks: field("num_blocks")?,
             block_size: field("block_size")?,
+            // Older workers predate sharding and simply omit this.
+            tensor_parallel_size: header
+                .get("tensor_parallel_size")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as usize,
             device: header
                 .get("device")
                 .and_then(|v| v.as_str())

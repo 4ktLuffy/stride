@@ -258,13 +258,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let info = executor.info().clone();
             tracing::info!(
-                "worker ready on {} as {}: {} blocks x {} tokens, vocab {}",
+                "worker ready on {} as {}: tp={}, {} blocks x {} tokens, vocab {}",
                 info.device,
                 info.dtype,
+                info.tensor_parallel_size,
                 info.num_blocks,
                 info.block_size,
                 info.vocab_size
             );
+            if info.tensor_parallel_size != args.tp {
+                return Err(format!(
+                    "tensor parallel mismatch: this server planned tp={} but the \
+                     worker is sharded across {} ranks. The capacity plan and the \
+                     KV cache sizing would both be wrong. Relaunch the worker with \
+                     `torchrun --nproc_per_node={}`, or pass --tp {}.",
+                    args.tp, info.tensor_parallel_size, args.tp, info.tensor_parallel_size
+                )
+                .into());
+            }
             if info.vocab_size != tokenizer.vocab_size() {
                 tracing::warn!(
                     "tokenizer vocabulary is {} but the worker reports {}; \

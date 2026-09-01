@@ -170,11 +170,34 @@ allocator, and the side that can leak memory is the side with the test suite.
 
 ---
 
+### Tensor parallelism
+
+One rank per GPU under `torchrun`, with the standard Megatron split: q/k/v and
+the MLP gate/up projections column-parallel, attention output and MLP down
+row-parallel, two all-reduces per layer, and a vocabulary-parallel output
+projection gathered once per pass. KV heads are sharded, so each rank stores
+only its own.
+
+```bash
+torchrun --nproc_per_node=4 -m stride_worker.worker --model /path/to/checkpoint
+stride --worker 127.0.0.1:9000 --tokenizer /path/to/checkpoint --model llama3-70b --tp 4
+```
+
+Rank 0 owns the socket. The control plane addresses one worker and is unaware
+there is more than one GPU — the sharding lives entirely below that seam.
+
+The sharding *math* is verified on CPU: each test splits a real attention block
+or MLP by hand, performs the collective by summing the shards directly, and
+requires the result to match the unsharded computation. NCCL itself needs
+hardware.
+
+---
+
 ## Not built
 
-- Distributed execution. `ParallelConfig` validates TP/PP/EP plans and the
-  planner sizes memory for them, but no NCCL code exists — the worker is
-  single-GPU.
+- Pipeline and expert parallelism. Validated by the planner, not implemented,
+  so MoE models replicate every expert on every rank.
+- Multi-node. One machine's GPUs only.
 - Disaggregated prefill/decode, speculative decoding, LoRA, structured output.
 - A real chat template. Messages are flattened as `role: content`.
 

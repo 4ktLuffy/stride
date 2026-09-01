@@ -1,13 +1,22 @@
 # Two processes, one model. The worker owns the GPU; the server owns every
 # scheduling and allocation decision and never touches the device.
 #
-#   MODEL=/models/Llama-3.1-8B-Instruct docker compose -f docker/docker-compose.yml up
+#   MODEL=/path/to/checkpoint TP=4 docker compose -f docker/docker-compose.yml up
+#
+# TP is the number of GPUs to shard across. It must not exceed the model's KV
+# head count - 8 for Llama-3.1-70B.
 services:
   worker:
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
+    # One rank per GPU. Set TP to the number of cards; it must match the
+    # server's --tp, and it cannot exceed the model's KV head count.
     command:
+      - torchrun
+      - --nproc_per_node=${TP:-1}
+      - -m
+      - stride_worker.worker
       - --model=/models/checkpoint
       - --host=0.0.0.0
       - --port=9000
@@ -39,6 +48,7 @@ services:
       - --tokenizer=/models/checkpoint
       - --model=llama3-8b
       - --gpu=h100
+      - --tp=${TP:-1}
       - --block-size=16
     volumes:
       - ${MODEL:?set MODEL to a checkpoint directory}:/models/checkpoint:ro

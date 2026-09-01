@@ -18,6 +18,8 @@ what has and has not been executed.
 | `stride-server` — OpenAI-compatible API | yes | yes | end to end, simulated |
 | `RemoteExecutor` — Rust client for the GPU worker | yes | **no** | needs a worker |
 | `stride_worker` — PyTorch execution, paged cache | yes | **no** | needs a GPU |
+| Tensor parallelism — sharding math | yes | yes | CI, on CPU |
+| Tensor parallelism — NCCL collectives | yes | **no** | needs 2+ GPUs |
 | Triton kernels — RMSNorm, paged attention, W4A16 GEMM | yes | **no** | needs a GPU |
 | Autotuner — correctness gate and negative controls | yes | yes | CI, on CPU |
 | Autotuner — Pareto search over kernel configs | yes | **no** | needs Triton |
@@ -74,28 +76,47 @@ fits, not how fast it runs.
 
 | What you have | What you can test |
 |---|---|
-| No GPU | Rust suite, simulator end to end, the gate self-check. All already green in CI. |
-| **1x 24-48 GB** (L40S, A6000, 4090) | **The most valuable tier.** 8B model end to end for real, all three Triton kernels, the full autotuner. Everything most likely to be broken is broken here. |
-| 1x 80 GB (A100/H100) | 8B at long context, or 70B quantised to INT4 (34.9 GiB weights, ~133k tokens of KV). |
-| 2x 80 GB | 70B in FP8 with tensor parallelism — except TP needs NCCL, which **is not written**. Use this tier for one-GPU long-context work instead. |
-| 8x 80 GB | What the planner is designed for, and what the runtime cannot yet use. Single-GPU only until NCCL lands. |
+| No GPU | Rust suite, simulator end to end, the gate self-check, the sharding math. All green in CI. |
+| **1x 24-48 GB** (L40S, A6000, 4090) | **Start here.** 8B end to end for real, all three Triton kernels, the full autotuner. Everything most likely to be broken is broken here, and it is the cheapest place to find it. |
+| 1x 80 GB (A100/H100) | 8B at long context, or 70B quantised to INT4 (34.9 GiB of weights, ~133k tokens of KV). |
+| 2x 80 GB | 70B in FP8 across two ranks: 32.9 GiB of weights each, ~278k tokens of KV, 67 concurrent at 4k. |
+| 4x 80 GB | 70B in BF16: 32.9 GiB each, ~556k tokens of KV, 135 concurrent at 4k. |
+| 8x 80 GB | 405B in FP8: 47.2 GiB each, ~490k tokens of KV, 119 concurrent at 4k. |
 
-**The honest ceiling: the worker is single-GPU.** `ParallelConfig` validates
-TP/PP/EP plans and the planner sizes memory for them, but no collective
-communication code exists. An eight-card node runs this on one card and idles
-the other seven.
+### Tensor parallelism
 
-So the largest model that can actually be *served* today is whatever fits on one
-GPU: 8B in BF16 on 24 GB, or 70B in INT4 on 80 GB. Anything bigger is a planning
-exercise until NCCL is implemented, and that is the single highest-value thing
-to build next.
+Launch one rank per GPU under `torchrun`:
+
+```bash
+torchrun --nproc_per_node=4 -m stride_worker.worker \
+    --model /path/to/Llama-3.1-70B-Instruct --port 9000
+```
+
+Rank 0 owns the socket; the control plane still addresses a single worker and is
+unaware there is more than one GPU. Pass a matching `--tp` to the server — a
+mismatch is refused at startup, because the capacity plan and the KV sizing
+would both be wrong.
+
+The split is the standard Megatron one: q/k/v and the MLP gate/up projections
+are column-parallel, the attention output and MLP down projections are
+row-parallel, and two all-reduces per layer put the partial sums back together.
+The output projection is vocabulary-parallel with a single gather per pass. KV
+heads are sharded, so each rank stores only its own — which is why a given block
+count costs less per rank as the degree rises.
+
+**The limit is KV heads.** Llama-3.1-70B has 8, so tensor parallelism works up
+to 8 ranks and is refused above that with a message saying so. Going further
+would mean replicating KV heads, which is not implemented.
+
+Still single-node: `--nproc_per_node` covers the GPUs in one machine. Pipeline
+parallelism across machines is validated by the planner but not implemented.
 
 ### Recommendation
 
-One L40S or A6000 for a few hours. That exercises every unverified line of code
-in this repository, and it costs less than a lunch. Booking an 8xH100 node
-before the single-GPU path works would spend real money to idle seven cards
-while finding the same bugs.
+Still start with one cheap card. The sharding math is verified on CPU, but no
+NCCL code has ever run, so the single-GPU path failing would tell you the same
+thing for a fraction of the cost. Once 8B works on one card, move straight to
+the multi-GPU node.
 
 ---
 
@@ -173,7 +194,28 @@ cargo run --release -p stride-server --bin stride -- \
 text.** If it is fluent but wrong, suspect the tokenizer or the RoPE scaling
 before you suspect attention.
 
-### 5. Kernel autotuning, one GPU
+### 5. Multi-GPU, two or more cards
+
+```bash
+torchrun --nproc_per_node=2 -m stride_worker.worker \
+    --model /path/to/Llama-3.1-8B-Instruct --port 9000
+
+cargo run --release -p stride-server --bin stride -- \
+  --model llama3-8b --tp 2 --gpu <your card> \
+  --worker 127.0.0.1:9000 --tokenizer /path/to/Llama-3.1-8B-Instruct
+```
+
+Compare the output against step 4 with the same seed and prompt. **Tensor
+parallelism must not change what the model says** — it changes where the
+arithmetic happens, not what it computes. Small floating-point differences in
+the last decimal are expected; a different sentence means the sharding is wrong,
+and the most likely culprit is a missing all-reduce or a projection split along
+the wrong axis.
+
+Watch `nvidia-smi` during a run: every card should show utilisation. If only
+one does, the followers are stuck in `receive_work` and never got the broadcast.
+
+### 6. Kernel autotuning, one GPU
 
 ```bash
 stride-autotune rmsnorm --device cuda --dtype bfloat16 --out rmsnorm.json --verbose
@@ -249,11 +291,13 @@ nothing to pipeline.
 
 Named so nobody goes looking:
 
-- Distributed execution. `ParallelConfig` validates TP/PP/EP plans and the
-  planner sizes memory for them, but no NCCL code exists — the worker is
-  single-GPU.
+- Pipeline and expert parallelism. `ParallelConfig` validates both and the
+  planner sizes memory for them, but only tensor parallelism is implemented.
+  MoE models therefore run with every expert replicated on every rank.
+- Multi-node. `torchrun --nproc_per_node` covers one machine's GPUs; nothing
+  handles a second host.
 - Disaggregated prefill/decode, speculative decoding, structured output,
-  LoRA adapters, multi-node anything.
+  LoRA adapters.
 - `n > 1` completions. The scheduler supports several sequences per request;
   the API rejects it rather than silently returning one.
 - A real chat template. Messages are flattened as `role: content`. Fine for

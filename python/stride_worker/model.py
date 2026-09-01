@@ -22,6 +22,14 @@ from pathlib import Path
 import torch
 
 from .cache import CacheSpec, PagedKVCache
+from .distributed import (
+    ParallelContext,
+    all_gather_last_dim,
+    all_reduce,
+    shard_column,
+    shard_row,
+    validate_plan,
+)
 from .layers import apply_rope, build_rope_cache, paged_attention, rms_norm, swiglu_mlp
 from .protocol import SequenceWork
 
@@ -77,10 +85,14 @@ class StrideModel:
         state: dict[str, torch.Tensor],
         device: torch.device,
         dtype: torch.dtype,
+        ctx: ParallelContext | None = None,
     ):
         self.config = config
         self.device = device
         self.dtype = dtype
+        self.ctx = ctx or ParallelContext(0, 1, 0, device, None)
+        tp = self.ctx.world_size
+        rank = self.ctx.rank
 
         self.num_layers = int(config["num_hidden_layers"])
         self.hidden_size = int(config["hidden_size"])
@@ -91,14 +103,27 @@ class StrideModel:
         self.eps = float(config.get("rms_norm_eps", 1e-5))
         self.scale = self.head_dim**-0.5
 
+        validate_plan(self.num_q_heads, self.num_kv_heads, tp)
+
+        # Heads this rank owns. Everything downstream — the KV cache shape, the
+        # attention reshape — is expressed in these, not the global counts.
+        self.num_q_heads_local = self.num_q_heads // tp
+        self.num_kv_heads_local = self.num_kv_heads // tp
+
+        # The embedding is replicated. It is a gather, not a matmul, so
+        # splitting it would buy a little memory in exchange for a collective on
+        # the critical path of every token.
         self.embed = state["model.embed_tokens.weight"].to(device=device, dtype=dtype)
         self.final_norm = state["model.norm.weight"].to(device=device, dtype=dtype)
-        # Tied embeddings are common on smaller checkpoints and the lm_head
-        # tensor is simply absent; reusing the embedding matrix is correct.
+
+        # The output projection is vocabulary-parallel: each rank produces a
+        # slice of the logits and they are gathered once per pass. On a 128k
+        # vocabulary that is real memory saved, and the gather happens at most
+        # once per step rather than per layer.
         lm_head = state.get("lm_head.weight")
-        self.lm_head = (
-            self.embed if lm_head is None else lm_head.to(device=device, dtype=dtype)
-        )
+        full_lm_head = self.embed if lm_head is None else lm_head.to(device=device, dtype=dtype)
+        self.lm_head = shard_column(full_lm_head, rank, tp)
+        self.vocab_size_local = self.lm_head.shape[0]
 
         self.layers: list[LayerWeights] = []
         for i in range(self.num_layers):
@@ -113,20 +138,31 @@ class StrideModel:
                     return None
                 return t.to(device=device, dtype=dtype)
 
+            def column(name: str, required: bool = True):
+                """Split an output dimension: no communication needed."""
+                t = get(name, required)
+                return None if t is None else shard_column(t, rank, tp)
+
+            def row(name: str):
+                """Split a reduction dimension: an all-reduce follows."""
+                return shard_row(get(name), rank, tp)
+
             self.layers.append(
                 LayerWeights(
+                    # Norms are elementwise over the hidden dimension, which is
+                    # never split, so every rank keeps the full weight.
                     input_norm=get("input_layernorm.weight"),
-                    q_proj=get("self_attn.q_proj.weight"),
-                    k_proj=get("self_attn.k_proj.weight"),
-                    v_proj=get("self_attn.v_proj.weight"),
-                    o_proj=get("self_attn.o_proj.weight"),
+                    q_proj=column("self_attn.q_proj.weight"),
+                    k_proj=column("self_attn.k_proj.weight"),
+                    v_proj=column("self_attn.v_proj.weight"),
+                    o_proj=row("self_attn.o_proj.weight"),
                     post_norm=get("post_attention_layernorm.weight"),
-                    gate_proj=get("mlp.gate_proj.weight"),
-                    up_proj=get("mlp.up_proj.weight"),
-                    down_proj=get("mlp.down_proj.weight"),
-                    q_bias=get("self_attn.q_proj.bias", required=False),
-                    k_bias=get("self_attn.k_proj.bias", required=False),
-                    v_bias=get("self_attn.v_proj.bias", required=False),
+                    gate_proj=column("mlp.gate_proj.weight"),
+                    up_proj=column("mlp.up_proj.weight"),
+                    down_proj=row("mlp.down_proj.weight"),
+                    q_bias=column("self_attn.q_proj.bias", required=False),
+                    k_bias=column("self_attn.k_proj.bias", required=False),
+                    v_bias=column("self_attn.v_proj.bias", required=False),
                 )
             )
 
@@ -141,7 +177,11 @@ class StrideModel:
 
     @classmethod
     def from_pretrained(
-        cls, path: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16
+        cls,
+        path: str,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        ctx: ParallelContext | None = None,
     ) -> "StrideModel":
         root = Path(path)
         config = json.loads((root / "config.json").read_text())
@@ -154,15 +194,25 @@ class StrideModel:
                 "Running it anyway would produce wrong activations silently."
             )
 
+        # Loaded to host memory first, then sharded onto the device. Every rank
+        # reads the whole checkpoint and keeps its slice; simple, and the cost
+        # is paid once at startup.
         state = _load_state_dict(root, device="cpu")
-        return cls(config, state, torch.device(device), dtype)
+        target = ctx.device if ctx is not None else torch.device(device)
+        return cls(config, state, target, dtype, ctx)
 
     def cache_spec(self, num_blocks: int, block_size: int) -> CacheSpec:
+        """Cache geometry for *this rank*.
+
+        Tensor parallelism shards KV heads, so each rank stores only its own —
+        which is why a given block count costs less memory per rank as the
+        parallel degree rises.
+        """
         return CacheSpec(
             num_layers=self.num_layers,
             num_blocks=num_blocks,
             block_size=block_size,
-            num_kv_heads=self.num_kv_heads,
+            num_kv_heads=self.num_kv_heads_local,
             head_dim=self.head_dim,
             dtype=self.dtype,
             device=self.device,
@@ -205,9 +255,11 @@ class StrideModel:
             k = torch.nn.functional.linear(h, layer.k_proj, layer.k_bias)
             v = torch.nn.functional.linear(h, layer.v_proj, layer.v_bias)
 
-            q = q.view(-1, self.num_q_heads, self.head_dim)
-            k = k.view(-1, self.num_kv_heads, self.head_dim)
-            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            # Local heads: this rank owns a slice of them, and its KV cache is
+            # shaped to match.
+            q = q.view(-1, self.num_q_heads_local, self.head_dim)
+            k = k.view(-1, self.num_kv_heads_local, self.head_dim)
+            v = v.view(-1, self.num_kv_heads_local, self.head_dim)
             q, k = apply_rope(q, k, self.cos, self.sin, position_ids)
 
             # Publish this pass's KV before attending, so a decode step can see
@@ -236,15 +288,22 @@ class StrideModel:
                     scale=self.scale,
                 )
 
-            x = residual + torch.nn.functional.linear(
-                attn.reshape(-1, self.num_q_heads * self.head_dim), layer.o_proj
+            # o_proj is row-parallel, so each rank holds a partial sum over its
+            # own heads. The all-reduce is what makes the residual correct.
+            attn_out = torch.nn.functional.linear(
+                attn.reshape(-1, self.num_q_heads_local * self.head_dim), layer.o_proj
             )
-            x = x + swiglu_mlp(
+            x = residual + all_reduce(attn_out, self.ctx)
+
+            # down_proj is likewise row-parallel: second and last collective of
+            # the layer.
+            mlp_out = swiglu_mlp(
                 rms_norm(x, layer.post_norm, self.eps),
                 layer.gate_proj,
                 layer.up_proj,
                 layer.down_proj,
             )
+            x = x + all_reduce(mlp_out, self.ctx)
 
         x = rms_norm(x, self.final_norm, self.eps)
 
@@ -261,7 +320,16 @@ class StrideModel:
         if not wanted:
             logits = torch.empty((0, self.vocab_size), device=self.device)
         else:
-            logits = torch.nn.functional.linear(x[rows], self.lm_head).float()
+            # Vocabulary-parallel: this rank computes its slice of the
+            # distribution, then one gather reassembles the whole thing. Done
+            # after the row selection above, so the gather carries a handful of
+            # rows rather than the entire batch.
+            local = torch.nn.functional.linear(x[rows], self.lm_head).float()
+            logits = all_gather_last_dim(local, self.ctx)
+            # The checkpoint's vocab_size can be smaller than the padded weight
+            # matrix; trim so ids line up with the tokenizer.
+            if logits.shape[-1] > self.vocab_size:
+                logits = logits[..., : self.vocab_size]
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
