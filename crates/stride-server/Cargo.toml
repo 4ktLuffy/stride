@@ -1,0 +1,30 @@
+[package]
+name = "stride-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenAI-compatible HTTP server for the Stride runtime."
+
+[[bin]]
+name = "stride"
+path = "src/main.rs"
+
+[dependencies]
+stride-core.workspace = true
+stride-model.workspace = true
+stride-kvcache.workspace = true
+stride-sched.workspace = true
+stride-backend.workspace = true
+stride-engine.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+uuid.workspace = true

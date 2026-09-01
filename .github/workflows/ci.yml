@@ -35,3 +35,34 @@ jobs:
 
       - name: Capacity planner runs
         run: cargo run -p stride-model --example plan
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # CPU-only torch: the gate and its negative controls exercise the checking
+      # logic, not the hardware, so they must never be skipped for want of a GPU.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e './python[dev]'
+
+      - name: Every module imports
+        run: |
+          python -c "import stride_worker.protocol, stride_worker.cache, stride_worker.layers"
+          python -c "import stride_worker.model, stride_worker.worker"
+          python -c "import stride_worker.kernels.rmsnorm, stride_worker.kernels.paged_attn, stride_worker.kernels.w4a16"
+          python -c "import stride_worker.autotune.gate, stride_worker.autotune.search"
+
+      # The load-bearing check: the gate must reject every known-broken kernel.
+      # If this passes vacuously, nothing the gate ever approves means anything.
+      - name: Correctness gate rejects broken kernels
+        run: stride-autotune verify --device cpu --dtype float32
+
+      - name: Tests
+        run: pytest python/tests -q

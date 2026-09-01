@@ -169,6 +169,16 @@ impl Scheduler {
         self.seqs.get(&id)
     }
 
+    /// Physical blocks backing a sequence's KV cache, in logical order.
+    pub fn block_table(&self, id: SequenceId) -> Option<&[BlockId]> {
+        self.tables.get(&id).map(|t| t.as_slice())
+    }
+
+    /// Sequences currently holding blocks, whether decoding or mid-prefill.
+    pub fn running_ids(&self) -> &[SequenceId] {
+        &self.running
+    }
+
     /// Blocks held back from admission so decodes can always grow.
     fn reserved_blocks(&self) -> usize {
         ((self.cache.capacity() as f64 * self.cfg.watermark).ceil() as usize).max(1)

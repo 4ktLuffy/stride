@@ -21,4 +21,10 @@ pub enum Error {
 
     #[error("invalid sampling parameters: {0}")]
     InvalidSampling(String),
+
+    #[error("queue is full ({queued} requests); retry later")]
+    Backpressure { queued: usize },
+
+    #[error("the engine is not running")]
+    EngineStopped,
 }

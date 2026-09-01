@@ -9,9 +9,13 @@ shape fits on the hardware you have. It targets large dense and
 Mixture-of-Experts transformers — 70B and 405B dense, 8x22B MoE — rather than
 small models that fit comfortably on one card.
 
-**Status: in development.** The memory, scheduling and planning layers are
-implemented and tested. Model execution and the GPU kernels are not yet written.
-See [Roadmap](#roadmap) for the honest boundary.
+**Status: in development.** The control plane — memory, scheduling, planning,
+sampling, streaming and the HTTP API — is implemented and runs end to end. The
+GPU worker and the Triton kernels are written but have never been executed,
+because they were developed on a machine with no CUDA device.
+
+**[HANDOFF.md](HANDOFF.md) states component by component what has run and what
+has not**, and gives the order to bring it up on real hardware.
 
 ---
 
@@ -135,15 +139,66 @@ them.
 
 ---
 
-## Building
+### `stride-server` — an OpenAI-compatible endpoint
 
-```bash
-cargo test --workspace     # 57 tests
-cargo run -p stride-model --example plan
+`/v1/chat/completions` and `/v1/completions`, streaming over SSE or buffered,
+plus `/v1/models`, `/health` and a Prometheus `/metrics`. Backpressure is a 429
+rather than an unbounded queue: a serving front end has to shed load, not
+absorb it silently.
+
+Usage reporting carries one extension, `stride_cached_prompt_tokens`, because
+how much of a prompt the cache served is the number that explains the bill.
+
+Run it with no GPU at all and it serves the analytic simulator, clearly marked
+as such in `/health` and in the `stride_backend_estimated` metric. Point it at a
+worker with `--worker` and it serves the real model.
+
+### The correctness gate
+
+Every Triton kernel has a PyTorch reference, and a kernel that disagrees with
+its reference is discarded no matter how fast it is. Three checks, because they
+fail differently: numerics against a tolerance declared per dtype, finiteness
+(a NaN the reference did not produce), and determinism (the same input twice —
+a race passes a single numeric check and fails in production).
+
+The gate itself is verified by eight deliberately broken kernels it must reject:
+
+```
+$ stride-autotune verify
+
+  reference vs itself          PASS  (must pass)
+  no_epsilon                   REJECTED
+  wrong_reduction_axis         REJECTED
+  scale_before_normalising     REJECTED
+  fp16_accumulation            REJECTED
+  drops_last_column            REJECTED
+  emits_nan                    REJECTED
+  non_deterministic            REJECTED
+  subtly_wrong_scale           REJECTED
 ```
 
-No GPU required. Everything implemented so far is host-side runtime logic and
-runs anywhere Rust does.
+A gate that has never rejected anything is not evidence of correctness. This
+runs on CPU, so it is never skipped for want of a GPU.
+
+---
+
+## Running it
+
+No GPU, simulated backend:
+
+```bash
+cargo test --workspace
+cargo run --release -p stride-server --bin stride -- --model llama3-8b --gpu l40s
+```
+
+With a real model, two processes — see [HANDOFF.md](HANDOFF.md):
+
+```bash
+stride-worker --model /path/to/checkpoint --port 9000
+stride --worker 127.0.0.1:9000 --tokenizer /path/to/checkpoint --model llama3-8b
+```
+
+Or `docker compose -f docker/docker-compose.yml up` with `MODEL` set.
 
 ---
 
@@ -155,28 +210,34 @@ runs anywhere Rust does.
 | `stride-kvcache` | Paged blocks, content-addressed prefix reuse, LRU eviction |
 | `stride-model` | Dense/MoE geometry, quantization formats, parallelism, capacity planning |
 | `stride-sched` | Continuous batching, chunked prefill, deadline ranking, preemption |
+| `stride-backend` | Tokenizers, sampling, the executor interface, the simulator, the worker client |
+| `stride-engine` | The async serving loop and token streaming |
+| `stride-server` | OpenAI-compatible HTTP API |
+
+| Python | What it does |
+|---|---|
+| `stride_worker` | PyTorch execution against the paged cache, over TCP |
+| `stride_worker.kernels` | Triton RMSNorm, paged attention, W4A16 GEMM |
+| `stride_worker.autotune` | The correctness gate, Pareto search, negative controls |
 
 The runtime never reads the wall clock. Every component takes the current tick
 as an argument, which is what makes a scheduling run replayable from a recorded
 trace.
 
+Two processes, one model: the Rust control plane owns every scheduling and
+allocation decision and never touches the device; the Python worker owns the
+weights and the forward pass and makes no decisions. One scheduler, one
+allocator, and the side that can leak memory is the side with the test suite.
+
 ---
 
-## Roadmap
+## Not built
 
-Not yet built, in the order they are worth building:
-
-- **Execution backend** — a trait over model execution plus an analytic
-  simulator, so the full loop runs end to end without a GPU, and a PyTorch
-  bridge for real weights.
-- **OpenAI-compatible API** — streaming completions over SSE, admission
-  control, backpressure and cancellation, with no Python on the request path.
-- **Kernels** — fused RMSNorm and RoPE, paged attention, W4A16 GEMM, and an
-  autotuner that gates every candidate against a reference at a declared
-  tolerance and keeps the Pareto front. Requires hardware to be more than
-  plausible-looking code.
-- **Distributed execution** — NCCL collectives behind the parallelism plans this
-  repository already validates.
+- Distributed execution. `ParallelConfig` validates TP/PP/EP plans and the
+  planner sizes memory for them, but no NCCL code exists — the worker is
+  single-GPU.
+- Disaggregated prefill/decode, speculative decoding, LoRA, structured output.
+- A real chat template. Messages are flattened as `role: content`.
 
 ---
 

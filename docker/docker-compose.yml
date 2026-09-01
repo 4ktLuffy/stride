@@ -1,0 +1,49 @@
+# Two processes, one model. The worker owns the GPU; the server owns every
+# scheduling and allocation decision and never touches the device.
+#
+#   MODEL=/models/Llama-3.1-8B-Instruct docker compose -f docker/docker-compose.yml up
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    command:
+      - --model=/models/checkpoint
+      - --host=0.0.0.0
+      - --port=9000
+      - --block-size=16
+    volumes:
+      - ${MODEL:?set MODEL to a checkpoint directory}:/models/checkpoint:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Weights take a while to load; the server waits rather than crash-looping.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket;socket.create_connection(('127.0.0.1',9000),2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    command:
+      - --host=0.0.0.0
+      - --port=8000
+      - --worker=worker:9000
+      - --tokenizer=/models/checkpoint
+      - --model=llama3-8b
+      - --gpu=h100
+      - --block-size=16
+    volumes:
+      - ${MODEL:?set MODEL to a checkpoint directory}:/models/checkpoint:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      worker:
+        condition: service_healthy

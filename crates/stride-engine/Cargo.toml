@@ -1,0 +1,17 @@
+[package]
+name = "stride-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The async serving loop: admission, batching, sampling and token streaming."
+
+[dependencies]
+stride-core.workspace = true
+stride-model.workspace = true
+stride-kvcache.workspace = true
+stride-sched.workspace = true
+stride-backend.workspace = true
+tokio.workspace = true
+tracing.workspace = true

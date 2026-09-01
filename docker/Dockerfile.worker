@@ -1,0 +1,19 @@
+# Execution worker: holds the weights and the KV blocks. Needs the GPU.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3-pip git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY python/pyproject.toml ./
+COPY python/stride_worker ./stride_worker
+
+RUN pip3 install --no-cache-dir \
+        torch --index-url https://download.pytorch.org/whl/cu124 \
+    && pip3 install --no-cache-dir safetensors transformers triton numpy \
+    && pip3 install --no-cache-dir -e .
+
+EXPOSE 9000
+ENTRYPOINT ["python3", "-m", "stride_worker.worker"]
+CMD ["--host", "0.0.0.0", "--port", "9000"]

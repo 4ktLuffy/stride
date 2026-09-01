@@ -1,0 +1,30 @@
+[project]
+name = "stride-worker"
+version = "0.1.0"
+description = "GPU execution worker for the Stride inference runtime."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.44",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Triton ships with CUDA PyTorch; named here so the dependency is explicit.
+cuda = ["triton>=3.0"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
+
+[project.scripts]
+stride-worker = "stride_worker.worker:main"
+stride-autotune = "stride_worker.autotune.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["stride_worker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300
