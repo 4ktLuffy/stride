@@ -32,6 +32,73 @@ been measured.
 
 ---
 
+## What hardware you actually need
+
+**NVIDIA GPUs, not CPUs.** This is worth stating plainly because it is easy to
+assume otherwise: the Rust control plane runs on CPU and is not the bottleneck,
+so a fast CPU buys nothing here. Everything that needs testing — the forward
+pass, the Triton kernels, the autotuner's timings — needs CUDA.
+
+The worker does accept `--device cpu`, and that is genuinely useful for checking
+correctness on a small model without booking a GPU. It is not useful for a large
+one: a 70B forward pass on CPU is minutes per token, and `triton_available()`
+hard-gates on `torch.cuda.is_available()`, so no kernel in `kernels/` will run at
+all. CPU proves the model code is right. It cannot prove anything about speed.
+
+### Checkpoint compatibility — check this first
+
+The worker implements Llama-family geometry only:
+
+```python
+SUPPORTED_ARCHITECTURES = {"LlamaForCausalLM", "MistralForCausalLM", "Qwen2ForCausalLM"}
+```
+
+It reads `architectures` from `config.json` and **refuses to load anything
+else**, deliberately — running a different architecture through this code would
+produce wrong activations silently rather than an error. So Llama 3.x, Mistral,
+Mixtral, Qwen2/2.5 and their finetunes work. DeepSeek-V3 (multi-head latent
+attention), Gemma, Phi, GPT-OSS and Command-R do not, and adding one is real
+work in `model.py`, not a config change.
+
+Check before booking anything:
+
+```bash
+python -c "import json;print(json.load(open('/path/to/checkpoint/config.json'))['architectures'])"
+```
+
+### Tiers
+
+Capacity figures below come from `stride --dry-run`, which is arithmetic over
+the model geometry and the card's published specification. They tell you what
+fits, not how fast it runs.
+
+| What you have | What you can test |
+|---|---|
+| No GPU | Rust suite, simulator end to end, the gate self-check. All already green in CI. |
+| **1x 24-48 GB** (L40S, A6000, 4090) | **The most valuable tier.** 8B model end to end for real, all three Triton kernels, the full autotuner. Everything most likely to be broken is broken here. |
+| 1x 80 GB (A100/H100) | 8B at long context, or 70B quantised to INT4 (34.9 GiB weights, ~133k tokens of KV). |
+| 2x 80 GB | 70B in FP8 with tensor parallelism — except TP needs NCCL, which **is not written**. Use this tier for one-GPU long-context work instead. |
+| 8x 80 GB | What the planner is designed for, and what the runtime cannot yet use. Single-GPU only until NCCL lands. |
+
+**The honest ceiling: the worker is single-GPU.** `ParallelConfig` validates
+TP/PP/EP plans and the planner sizes memory for them, but no collective
+communication code exists. An eight-card node runs this on one card and idles
+the other seven.
+
+So the largest model that can actually be *served* today is whatever fits on one
+GPU: 8B in BF16 on 24 GB, or 70B in INT4 on 80 GB. Anything bigger is a planning
+exercise until NCCL is implemented, and that is the single highest-value thing
+to build next.
+
+### Recommendation
+
+One L40S or A6000 for a few hours. That exercises every unverified line of code
+in this repository, and it costs less than a lunch. Booking an 8xH100 node
+before the single-GPU path works would spend real money to idle seven cards
+while finding the same bugs.
+
+---
+
 ## What to run, in order
 
 Each step is a checkpoint. If one fails, stop there — the later steps depend on
